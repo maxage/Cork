@@ -1,0 +1,64 @@
+name: 自动同步上游 Cork 仓库
+
+on:
+  schedule:
+    # 每天凌晨 2 点自动同步（UTC 时间，可改成别的时间）
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # 支持手动点击执行
+
+permissions:
+  contents: write       # 允许更新代码
+  pull-requests: write  # 允许创建 PR
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出你的仓库
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: 配置 Git 用户信息
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 添加上游并获取更新
+        run: |
+          BRANCH=main
+          git remote add upstream https://github.com/buresdv/Cork.git || true
+          git fetch upstream
+
+      - name: 尝试快进合并上游
+        id: ff
+        run: |
+          set -e
+          BRANCH=main
+          git checkout "$BRANCH"
+          if git merge-base --is-ancestor "upstream/$BRANCH" "origin/$BRANCH"; then
+            echo "already up-to-date"
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            if git merge --ff-only "upstream/$BRANCH"; then
+              git push origin "$BRANCH"
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=diverged" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: 创建同步 PR（仅在无法快进时）
+        if: steps.ff.outputs.changed == 'diverged'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: 同步上游 Cork 仓库"
+          title: "自动同步上游 Cork 代码"
+          body: |
+            ⚙️ 自动同步上游失败（存在分叉）。
+            请查看此 PR 并手动合并来保持同步。
+          branch: "auto/sync-upstream"
+          base: "main"
+          labels: 自动化
