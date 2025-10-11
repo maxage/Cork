@@ -1,10 +1,8 @@
 name: 手动构建 Cork 应用（macOS 未签名，仅私用）
 
-# 🚀 触发方式：仅手动运行（你在 Actions 页面点 Run workflow）
 on:
   workflow_dispatch:
 
-# ⚙️ 权限：只读，不发布 Release（避免任何公开分发）
 permissions:
   contents: read
 
@@ -14,24 +12,23 @@ jobs:
     name: 编译 Cork 项目并生成 DMG（仅个人使用）
 
     steps:
-      # 🧱 第 1 步：检出仓库代码
+      # 1) 检出代码
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 🧰 第 2 步：选择 Xcode 版本（与上游要求一致，建议 16）
+      # 2) 选择 Xcode 版本
       - name: 选择 Xcode 16（推荐）
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '16'
 
-      # 🧩 第 3 步：在 CI 上跳过 SPM 插件/宏指纹校验（修复 SwiftLintBuildToolPlugin 报错）
-      # 以及配合 xcodebuild 的 -skipPackagePluginValidation / -skipMacroValidation
+      # 3) 在 CI 上跳过 SPM 插件/宏的指纹校验（拼写已修正）
       - name: 允许 CI 信任 SPM 插件与宏（跳过指纹校验）
         run: |
-          defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
+          defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidation -bool YES
           defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
 
-      # ⚡️ 第 4 步：缓存（Mise / Tuist / Homebrew 缓存），加速后续构建
+      # 4) 缓存（Mise / Tuist / Homebrew）
       - name: 恢复缓存
         uses: actions/cache@v4
         with:
@@ -43,25 +40,38 @@ jobs:
           restore-keys: |
             cork-cache-${{ runner.os }}-
 
-      # 📦 第 5 步：安装 Mise（用于执行固定版本的 Tuist）
+      # 5) 安装 Mise
       - name: 安装 Mise
         run: |
           curl -fsSL https://mise.run | sh || true
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      # 🧭 第 6 步：使用 Tuist 生成 Xcode 工程
+      # 6) 用 Tuist 生成 Xcode 工程（这一步已成功拉取 Defaults 等依赖）
       - name: 生成 Xcode 工程（Tuist）
         run: |
           ~/.local/bin/mise install tuist@4.50.2
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
 
-      # 🧠 第 7 步：编译 Cork（Release，禁用代码签名；加 pipefail + 跳过插件/宏校验）
+      # 7) 解析包依赖（显式指定 workspace；并跳过插件/宏校验）
+      - name: 解析包依赖（SPM）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace Cork.xcworkspace \
+            -scheme "Self-Compiled" \
+            -resolvePackageDependencies \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            | tee resolve.log
+
+      # 8) 编译（显式指定 workspace；开启 pipefail；禁签名；跳过插件/宏校验）
       - name: 编译 Cork 应用
         run: |
           set -o pipefail
           echo "开始编译 Cork..."
           xcodebuild \
+            -workspace Cork.xcworkspace \
             -scheme "Self-Compiled" \
             -configuration Release \
             -derivedDataPath build \
@@ -70,27 +80,27 @@ jobs:
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
             | tee build.log
-          echo "✅ 编译结束（如失败可查看 build.log）"
+          echo "✅ 编译结束（如失败请查看 build.log）"
 
-      # 🔍 第 8 步：列出构建产物（便于排错）
+      # 9) 查看构建产物目录（排错用）
       - name: 查看构建产物目录
         run: |
           echo "构建目录内容如下："
           ls -R build/Build/Products || true
           ls -R build/Build/Products/Release || true
 
-      # 🗜 第 9 步：打包 Cork.app 为 ZIP（存在性检查）
+      # 10) 打包 ZIP（存在性检查）
       - name: 打包 Cork.app 为 ZIP
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "❌ 未找到 ${APP_PATH}，请打开 build.log 排查失败原因。"
+            echo "❌ 未找到 ${APP_PATH}，请打开 build.log / resolve.log 排查失败原因。"
             exit 1
           fi
           ditto -c -k --keepParent "$APP_PATH" Cork-Release.zip
           echo "✅ ZIP 打包完成"
 
-      # 💿 第 10 步：生成未签名 DMG（仅个人使用）
+      # 11) 生成未签名 DMG
       - name: 生成未签名 DMG
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
@@ -102,7 +112,7 @@ jobs:
           hdiutil create -volname "Cork" -srcfolder "$STAGING" -ov -format UDZO "$DMG_NAME"
           echo "✅ DMG 打包完成"
 
-      # 📤 第 11 步：上传构建产物（Artifacts，仅你能下载）
+      # 12) 上传私密产物（Artifacts）
       - name: 上传构建产物（私密 Artifacts）
         uses: actions/upload-artifact@v4
         with:
@@ -111,5 +121,6 @@ jobs:
             Cork-Release.zip
             Cork-Release-unsigned.dmg
             build.log
+            resolve.log
           if-no-files-found: error
           retention-days: 7
