@@ -15,6 +15,7 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # 使用 Xcode 16.4（包含 macOS 15 SDK / SF Symbols 6）
       - name: 选择 Xcode 16.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -23,12 +24,14 @@ jobs:
       - name: 打印 Xcode 版本
         run: xcodebuild -version
 
+      # 跳过 SPM 插件/宏指纹校验（CI 必备）
       - name: 允许 CI 信任 SPM 插件与宏（跳过指纹校验）
         run: |
           defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidation -bool YES
           defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
 
-      - name: 恢复缓存（Mise / Tuist / Homebrew）
+      # 缓存（Mise / Tuist / Homebrew），提速
+      - name: 恢复缓存
         uses: actions/cache@v4
         with:
           path: |
@@ -50,33 +53,42 @@ jobs:
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
 
+      # 列出 schemes，确认含有 “Self-Compiled”
       - name: 列出可用 schemes
         run: |
           xcodebuild -workspace Cork.xcworkspace -list | tee schemes.txt
 
+      # 在 workspace 上解析依赖（跳过插件/宏校验）
       - name: 解析包依赖（SPM）
         run: |
           set -o pipefail
           xcodebuild \
             -workspace Cork.xcworkspace \
-            -scheme Cork \
+            -scheme "Self-Compiled" \
             -resolvePackageDependencies \
             -skipPackagePluginValidation \
             -skipMacroValidation \
             | tee resolve.log
 
-      # ✅ 修正点：使用 --configuration Release（而不是 -c）
-      - name: 编译 Cork 应用（Tuist build -> scheme=Cork）
+      # ✅ 关键：用 Self-Compiled scheme，并把语言/并发模式钉到与上游一致的配置
+      - name: 编译 Cork 应用（Self-Compiled）
         run: |
           set -o pipefail
-          echo "开始编译（tuist build --configuration Release Cork）..."
-          ~/.local/bin/mise exec tuist@4.50.2 -- tuist build --configuration Release Cork -- \
+          echo "开始编译（Self-Compiled / Release）..."
+          xcodebuild \
+            -workspace Cork.xcworkspace \
+            -scheme "Self-Compiled" \
+            -configuration Release \
             -derivedDataPath build \
             -destination 'generic/platform=macOS' \
             -skipPackagePluginValidation \
             -skipMacroValidation \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=-
-          echo "✅ 编译结束"
+            SWIFT_VERSION=5.0 \
+            SWIFT_STRICT_CONCURRENCY=targeted \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
+            | tee build.log
+          echo "✅ 编译阶段结束（失败请看 build.log / resolve.log）"
 
       - name: 查看构建产物目录
         run: |
@@ -88,7 +100,7 @@ jobs:
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "❌ 未找到 ${APP_PATH}，请查看 schemes.txt / resolve.log / build 日志。"
+            echo "❌ 未找到 ${APP_PATH}，请先查看 schemes.txt / resolve.log / build.log，确认 scheme=Self-Compiled 成功构建。"
             exit 1
           fi
           ditto -c -k --keepParent "$APP_PATH" Cork-Release.zip
@@ -112,5 +124,6 @@ jobs:
             Cork-Release-unsigned.dmg
             schemes.txt
             resolve.log
+            build.log
           if-no-files-found: error
           retention-days: 7
