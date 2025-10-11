@@ -1,96 +1,115 @@
-name: 编译 Cork 项目并生成 DMG（仅个人使用）
+name: 编译 Cork（本地私用，未签名 DMG）
 
 on:
-  workflow_dispatch: {}   # 仅手动触发
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Cork (Swift 6 + macOS 15 SDK)
     runs-on: macos-15
     env:
-      # 关键：部署目标≥14，匹配项目里用到的 SwiftData 等 API
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
-      # 关键：选用 Xcode 16.4（含 macOS 15.5 SDK）
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
-      # 让 SPM 插件（如 SwiftLint 插件）在 CI 环境下可用
-      SKIP_PACKAGE_PLUGIN_VALIDATION: "1"
+      # ★ 关键：把最低系统提高到 15.0，解决 SwiftUI API 兼容性问题
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      DEVELOPER_DIR: /Applications/Xcode_17.0.app/Contents/Developer
+      MD_APPLE_SDK_ROOT: /Applications/Xcode_17.0.app
 
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 mise（用于装 tuist）
+      - name: 选择 Xcode 17.0
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '17.0'
+
+      - name: 打印 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 跳过 SPM 插件/宏指纹校验
+        run: |
+          defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidation -bool YES
+          defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
+
+      - name: 缓存（mise / tuist / brew）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.tuist
+            ~/Library/Caches/Homebrew
+          key: cork-cache-${{ runner.os }}-${{ hashFiles('**/Tuist.swift', '**/.mise.toml') }}
+          restore-keys: |
+            cork-cache-${{ runner.os }}-
+
+      - name: 安装 mise
         run: |
           curl -fsSL https://mise.run | sh || true
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: 安装 tuist
+      - name: 安装/生成 Tuist 工程
         run: |
-          ~/.local/bin/mise plugins install tuist || true
-          ~/.local/bin/mise use -g tuist@latest
-          tuist version
+          ~/.local/bin/mise install tuist@4.50.2
+          ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
+          ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
 
-      - name: 选择 Xcode 16.4
-        run: sudo xcode-select -switch /Applications/Xcode_16.4.app
+      - name: 列出 schemes
+        run: xcodebuild -workspace Cork.xcworkspace -list | tee schemes.txt
 
-      - name: 允许使用包插件（SwiftLint 等）
-        run: defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
-
-      - name: 准备 Tuist 工程（不改源码）
-        run: |
-          tuist install
-          tuist fetch
-          tuist generate --no-open
-
-      - name: 用 Swift 6 编译 Cork（Self-Compiled Scheme）
+      - name: 解析包依赖
         run: |
           set -o pipefail
           xcodebuild \
-            -project Cork.xcodeproj \
+            -workspace Cork.xcworkspace \
+            -scheme "Self-Compiled" \
+            -resolvePackageDependencies \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            | tee resolve.log
+
+      - name: 编译（Release，未签名）
+        run: |
+          set -o pipefail
+          echo "开始编译（Self-Compiled / Release / macOS ${MACOSX_DEPLOYMENT_TARGET}）..."
+          xcodebuild \
+            -workspace Cork.xcworkspace \
             -scheme "Self-Compiled" \
             -configuration Release \
-            -destination 'generic/platform=macOS' \
             -derivedDataPath build \
+            -destination 'generic/platform=macOS' \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
-            SWIFT_VERSION=6.0 \
-            | tee build.log | xcpretty
-          echo "✅ 编译完成"
+            | tee build.log
+          echo "✅ 编译结束"
 
-      - name: 检查构建产物目录
+      - name: 检查构建产物
         run: |
-          echo "构建目录内容如下："
-          ls -la build/Build/Products/Release || true
-
-      - name: 组装 Cork.app 路径
-        id: paths
-        run: |
-          APP_PATH="build/Build/Products/Release/Cork.app"
-          if [ ! -d "$APP_PATH" ]; then
-            echo "❌ 未找到 Cork.app，编译失败！"; exit 1
+          APP="build/Build/Products/Release/Cork.app"
+          if [ ! -d "$APP" ]; then
+            echo "❌ 没找到 $APP"
+            ls -R build/Build/Products || true
+            exit 1
           fi
-          echo "app=$APP_PATH" >> "$GITHUB_OUTPUT"
+          echo "✅ 找到：$APP"
 
-      - name: 打包 Cork.app 为 ZIP（便于下载）
+      - name: 生成未签名 DMG
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "${{ steps.paths.outputs.app }}" "Cork.app.zip"
-          ls -la "Cork.app.zip"
+          APP="build/Build/Products/Release/Cork.app"
+          OUT="Cork-unsigned.dmg"
+          mkdir -p dist
+          hdiutil create -volname "Cork" -srcfolder "$APP" -ov -format UDZO "dist/$OUT"
+          echo "✅ DMG：dist/$OUT"
 
-      - name: 生成未签名 DMG（仅个人使用）
-        run: |
-          mkdir -p dmg_root
-          cp -R "${{ steps.paths.outputs.app }}" dmg_root/
-          hdiutil create -volname "Cork" -srcfolder dmg_root -ov -format UDZO "Cork-unsigned.dmg"
-          ls -la "Cork-unsigned.dmg"
-
-      - name: 上传构建产物（私密 Artifacts）
+      - name: 上传私密工件
         uses: actions/upload-artifact@v4
         with:
-          name: Cork-macOS-unsigned
+          name: cork-unsigned-dmg
           path: |
+            dist/Cork-unsigned.dmg
+            schemes.txt
+            resolve.log
             build.log
-            Cork.app.zip
-            Cork-unsigned.dmg
-          retention-days: 7
+          if-no-files-found: error
