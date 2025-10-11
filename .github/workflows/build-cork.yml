@@ -50,7 +50,6 @@ jobs:
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
 
-      # 👇 列出 workspace 里的 scheme，确认有哪些（关键排查信息）
       - name: 列出可用 schemes
         run: |
           xcodebuild -workspace Cork.xcworkspace -list | tee schemes.txt
@@ -66,12 +65,12 @@ jobs:
             -skipMacroValidation \
             | tee resolve.log
 
-      # ⚠️ 与上游一致：用 Tuist 驱动构建“Cork”这个 scheme（不是 Self-Compiled）
+      # ✅ 修正点：使用 --configuration Release（而不是 -c）
       - name: 编译 Cork 应用（Tuist build -> scheme=Cork）
         run: |
           set -o pipefail
-          echo "开始编译（tuist build Cork -c Release）..."
-          ~/.local/bin/mise exec tuist@4.50.2 -- tuist build Cork -c Release -- \
+          echo "开始编译（tuist build --configuration Release Cork）..."
+          ~/.local/bin/mise exec tuist@4.50.2 -- tuist build --configuration Release Cork -- \
             -derivedDataPath build \
             -destination 'generic/platform=macOS' \
             -skipPackagePluginValidation \
@@ -89,11 +88,10 @@ jobs:
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "❌ 未找到 ${APP_PATH}。请先查看 schemes.txt / resolve.log / build.log，确认使用的 scheme 是否正确（推荐：Cork）。"
+            echo "❌ 未找到 ${APP_PATH}，请查看 schemes.txt / resolve.log / build 日志。"
             exit 1
           fi
           ditto -c -k --keepParent "$APP_PATH" Cork-Release.zip
-          echo "✅ ZIP 打包完成"
 
       - name: 生成未签名 DMG
         run: |
@@ -104,7 +102,6 @@ jobs:
           mkdir -p "$STAGING"
           cp -R "$APP_PATH" "$STAGING/"
           hdiutil create -volname "Cork" -srcfolder "$STAGING" -ov -format UDZO "$DMG_NAME"
-          echo "✅ DMG 打包完成"
 
       - name: 上传构建产物（私密 Artifacts）
         uses: actions/upload-artifact@v4
