@@ -8,27 +8,29 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     name: 编译 Cork 项目并生成 DMG（仅个人使用）
 
     steps:
-      # 1) 检出代码
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 2) 选择 Xcode 版本
-      - name: 选择 Xcode 16（推荐）
+      # 用更高版本的 Xcode（16.4+ 支持 SF Symbols 6）
+      - name: 选择 Xcode 16.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16'
+          xcode-version: '16.4'
 
-      # 3) 在 CI 上跳过 SPM 插件/宏的指纹校验（拼写已修正）
+      - name: 打印 Xcode 版本（确认）
+        run: xcodebuild -version
+
+      # 跳过 SPM 插件/宏指纹校验（避免 SwiftLint 插件弹窗阻塞）
       - name: 允许 CI 信任 SPM 插件与宏（跳过指纹校验）
         run: |
           defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidation -bool YES
           defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
 
-      # 4) 缓存（Mise / Tuist / Homebrew）
+      # 缓存：Mise / Tuist / Homebrew
       - name: 恢复缓存
         uses: actions/cache@v4
         with:
@@ -40,20 +42,18 @@ jobs:
           restore-keys: |
             cork-cache-${{ runner.os }}-
 
-      # 5) 安装 Mise
       - name: 安装 Mise
         run: |
           curl -fsSL https://mise.run | sh || true
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      # 6) 用 Tuist 生成 Xcode 工程（这一步已成功拉取 Defaults 等依赖）
       - name: 生成 Xcode 工程（Tuist）
         run: |
           ~/.local/bin/mise install tuist@4.50.2
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
           ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
 
-      # 7) 解析包依赖（显式指定 workspace；并跳过插件/宏校验）
+      # 显式在 workspace 上解析依赖（避免“找不到 Defaults”等包）
       - name: 解析包依赖（SPM）
         run: |
           set -o pipefail
@@ -65,7 +65,7 @@ jobs:
             -skipMacroValidation \
             | tee resolve.log
 
-      # 8) 编译（显式指定 workspace；开启 pipefail；禁签名；跳过插件/宏校验）
+      # 用 workspace 编译；禁签名；保留日志
       - name: 编译 Cork 应用
         run: |
           set -o pipefail
@@ -80,27 +80,23 @@ jobs:
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
             | tee build.log
-          echo "✅ 编译结束（如失败请查看 build.log）"
+          echo "✅ 编译阶段结束（失败请看 build.log / resolve.log）"
 
-      # 9) 查看构建产物目录（排错用）
       - name: 查看构建产物目录
         run: |
           echo "构建目录内容如下："
           ls -R build/Build/Products || true
           ls -R build/Build/Products/Release || true
 
-      # 10) 打包 ZIP（存在性检查）
       - name: 打包 Cork.app 为 ZIP
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "❌ 未找到 ${APP_PATH}，请打开 build.log / resolve.log 排查失败原因。"
+            echo "❌ 未找到 ${APP_PATH}，请查看 build.log / resolve.log 排查原因（多半是 Xcode 版本或资产编译失败）。"
             exit 1
           fi
           ditto -c -k --keepParent "$APP_PATH" Cork-Release.zip
-          echo "✅ ZIP 打包完成"
 
-      # 11) 生成未签名 DMG
       - name: 生成未签名 DMG
         run: |
           APP_PATH="build/Build/Products/Release/Cork.app"
@@ -110,9 +106,7 @@ jobs:
           mkdir -p "$STAGING"
           cp -R "$APP_PATH" "$STAGING/"
           hdiutil create -volname "Cork" -srcfolder "$STAGING" -ov -format UDZO "$DMG_NAME"
-          echo "✅ DMG 打包完成"
 
-      # 12) 上传私密产物（Artifacts）
       - name: 上传构建产物（私密 Artifacts）
         uses: actions/upload-artifact@v4
         with:
