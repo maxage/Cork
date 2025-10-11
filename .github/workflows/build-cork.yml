@@ -1,0 +1,104 @@
+name: 手动构建 Cork 应用（macOS 未签名，仅私用）
+
+# 🚀 触发方式：仅手动运行
+on:
+  workflow_dispatch:
+
+# ⚙️ 权限设置：只读，不会发布 Release
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    name: 编译 Cork 项目并生成 DMG（仅个人使用）
+
+    steps:
+      # 🧱 第 1 步：检出仓库代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 🧰 第 2 步：设置 Xcode 版本
+      - name: 选择 Xcode 16（推荐版本）
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16'
+
+      # ⚡️ 第 3 步：缓存构建依赖（Mise、Tuist、本地缓存）
+      - name: 恢复缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.tuist
+            ~/Library/Caches/Homebrew
+          key: cork-cache-${{ runner.os }}-${{ hashFiles('**/Tuist.swift', '**/.mise.toml') }}
+          restore-keys: |
+            cork-cache-${{ runner.os }}-
+
+      # 📦 第 4 步：安装 Mise（轻量级版本管理器）
+      - name: 安装 Mise
+        run: |
+          curl -fsSL https://mise.run | sh || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # 🧩 第 5 步：生成 Xcode 工程（通过 Tuist）
+      - name: 使用 Tuist 生成项目
+        run: |
+          ~/.local/bin/mise install tuist@4.50.2
+          ~/.local/bin/mise exec tuist@4.50.2 -- tuist install
+          ~/.local/bin/mise exec tuist@4.50.2 -- tuist generate --no-binary-cache
+
+      # 🧠 第 6 步：编译 Cork（Release，无需证书）
+      - name: 编译 Cork 应用
+        run: |
+          echo "开始编译 Cork..."
+          xcodebuild \
+            -scheme "Self-Compiled" \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
+            | tee build.log | xcpretty
+          echo "✅ 编译完成"
+
+      # 🔍 第 7 步：列出构建结果（调试用）
+      - name: 查看构建产物目录
+        run: |
+          echo "构建目录内容如下："
+          ls -R build/Build/Products/Release || echo "❌ 构建目录为空！"
+
+      # 🗜 第 8 步：打包 Cork.app 为 ZIP
+      - name: 打包 Cork.app 为 ZIP
+        run: |
+          APP_PATH="build/Build/Products/Release/Cork.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ 未找到 Cork.app，编译失败！"
+            exit 1
+          fi
+          ditto -c -k --keepParent "$APP_PATH" Cork-Release.zip
+          echo "✅ ZIP 打包完成"
+
+      # 💿 第 9 步：生成未签名 DMG
+      - name: 生成未签名 DMG（仅私用）
+        run: |
+          APP_PATH="build/Build/Products/Release/Cork.app"
+          STAGING="dmg_stage"
+          DMG_NAME="Cork-Release-unsigned.dmg"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "$APP_PATH" "$STAGING/"
+          hdiutil create -volname "Cork" -srcfolder "$STAGING" -ov -format UDZO "$DMG_NAME"
+          echo "✅ DMG 打包完成"
+
+      # 📤 第 10 步：上传产物（Artifacts，仅你能下载）
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cork-macOS-unsigned
+          path: |
+            Cork-Release.zip
+            Cork-Release-unsigned.dmg
+            build.log
+          if-no-files-found: error
+          retention-days: 7
